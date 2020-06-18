@@ -38,7 +38,9 @@
 #define LED_OFF     HIGH
 #endif
 
-// unsure if this will fork for ESP32 and ESP8266
+#define CONFIG_PIN        0
+
+// unsure if this will work for ESP32 and ESP8266
 WiFiClient wClient;
 
 // Pin D2 mapped to pin GPIO2/ADC12 of ESP32, or GPIO2/TXD1 of NodeMCU control on-board LED
@@ -75,15 +77,18 @@ char mqtt_port     [MQTT_SERVER_PORT_LEN]    = "1883";
 char mqtt_user     [MQTT_SERVER_USER_LEN]    = "";
 char mqtt_password [MQTT_SERVER_PASSWORD_LEN] = "";
 String nodeid = "";
-long int mqtt_port_int;
+long int mqtt_port_int = 1883;
 String swVersion = "1.0.0";
 String hwVersion = "ESP8266";
+
+String chipID = String(ESP_getChipId(), HEX);
 
 //flag for saving data
 bool shouldSaveConfig = false;
 
 char statusTopic[50];
 char dataTopic[50];
+char controlTopic[50];
 
 // ###########################################################################
 
@@ -273,18 +278,82 @@ void toggleLED()
   digitalWrite(PIN_LED, !digitalRead(PIN_LED));
 }
 
+// #################################################################################
+void run_config_portal()
+{
+
+  // The extra parameters to be configured (can be either global or just in the setup)
+  // After connecting, parameter.getValue() will get you the configured value
+  // id/name placeholder/prompt default length
+  Serial.println("Running config portal");
+  ESP_WMParameter custom_mqtt_server   ("mqtt_server",   "MQTT Server",   mqtt_server,   MQTT_SERVER_MAX_LEN + 1);
+  ESP_WMParameter custom_mqtt_port     ("mqtt_port",     "MQTT Port",     mqtt_port,     MQTT_SERVER_PORT_LEN + 1);
+  ESP_WMParameter custom_mqtt_user     ("mqtt_user",     "MQTT User",     mqtt_user,     MQTT_SERVER_USER_LEN + 1);
+  ESP_WMParameter custom_mqtt_password ("mqtt_password", "MQTT Password", mqtt_password, MQTT_SERVER_PASSWORD_LEN + 1);
+
+  ESP_WiFiManager ESP_wifiManager("AutoConnect");
+
+  //add all your parameters here
+  ESP_wifiManager.addParameter(&custom_mqtt_server);
+  ESP_wifiManager.addParameter(&custom_mqtt_port);
+  ESP_wifiManager.addParameter(&custom_mqtt_user);
+  ESP_wifiManager.addParameter(&custom_mqtt_password);
+
+  //set config save notify callback
+  ESP_wifiManager.setSaveConfigCallback(saveConfigCallback);
+
+  // SSID and PW for Config Portal
+  AP_SSID = "ESP_" + chipID;
+  char cAP_SSID[25];
+  AP_SSID.toCharArray(cAP_SSID, 25);
+
+  ESP_wifiManager.setAPStaticIPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  if (!ESP_wifiManager.startConfigPortal(cAP_SSID)) {
+    Serial.println("failed to connect and hit timeout");
+    delay(3000);
+    //reset and try again, or maybe put it to deep sleep
+#ifdef ESP8266
+    ESP.reset();
+#else   //ESP32
+    ESP.restart();
+#endif
+    delay(5000);
+  }
+
+  strncpy(mqtt_server,   custom_mqtt_server.getValue(),   sizeof(mqtt_server));
+  strncpy(mqtt_port,     custom_mqtt_port.getValue(),     sizeof(mqtt_port));
+  mqtt_port_int = atoi(custom_mqtt_port.getValue());
+  //Serial.println(mqtt_port_int);
+  strncpy(mqtt_user,     custom_mqtt_user.getValue(),     sizeof(mqtt_user));
+  strncpy(mqtt_password, custom_mqtt_password.getValue(), sizeof(mqtt_password));
+
+  //save the custom parameters to FS
+  if (shouldSaveConfig)
+  {
+    saveSPIFFSConfigFile();
+  }
+#ifdef ESP8266
+  ESP.reset();
+#else   //ESP32
+  ESP.restart();
+#endif
+  delay(5000);
+}
+
 // ################################################################################
 void check_status()
 {
   static ulong checkstatus_timeout  = 0;
   static ulong LEDstatus_timeout    = 0;
   static ulong sendstatus_timeout  = 0;
+  static ulong configPin_timeout  = 0;
   static ulong currentMillis;
-
+  int buttonState;
 
 #define HEARTBEAT_INTERVAL    10000L
 #define LED_INTERVAL          2000L
 #define STATUS_INTERVAL       600000L   // 10 min
+#define CONFIGPIN_INTERVAL    1000L     // 1 sec
 
   currentMillis = millis();
 
@@ -302,41 +371,83 @@ void check_status()
     checkstatus_timeout = currentMillis + HEARTBEAT_INTERVAL;
   }
 
+  buttonState = digitalRead(CONFIG_PIN);
+  if (buttonState == 0)     // 0 means pin is triggered
+  {
+    if (configPin_timeout == 0)   // first noted
+    {
+      Serial.println("Button triggered");
+      configPin_timeout = currentMillis;    // the time first seen
+    }
+    else
+    {
+      if (currentMillis > (configPin_timeout + CONFIGPIN_INTERVAL))
+      {
+        run_config_portal();
+      }
+    }
+  }
+  else
+  {
+    configPin_timeout = 0;    // reset the timer
+  }
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.print("Wifi status is: ");
+    Serial.println(WiFi.status());
+    delay(10000); // 5 sec just to see
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      Serial.print("Wifi status is: ");
+      Serial.println(WiFi.status());
+      run_config_portal();
+    }
+  }
+
   if (!mqttClient.connected()) {
     mqtt_reconnect();
   }
-  mqttClient.loop();
+  //mqttClient.loop();
 
   if ((currentMillis > sendstatus_timeout))
   {
     sendstatus_timeout = currentMillis + STATUS_INTERVAL;
-      DynamicJsonDocument payload(1024);
-      payload["NodeID"] = nodeid;
-      payload["status"] = "OK";
-      payload["SW_Version"] = swVersion;
-      payload["HW"] = hwVersion;
-      payload["uptime"] = currentMillis / 60000;
+    DynamicJsonDocument payload(1024);
+    payload["NodeID"] = nodeid;
+    payload["status"] = "OK";
+    payload["SW_Version"] = swVersion;
+    payload["HW"] = hwVersion;
+    payload["uptime"] = currentMillis / 60000;
 
-      char cPayload[1024];
-      serializeJson(payload, cPayload, 1024);
-      mqttClient.publish(statusTopic, cPayload);
-
+    char cPayload[1024];
+    serializeJson(payload, cPayload, 1024);
+    mqttClient.publish(statusTopic, cPayload);
   }
-
-
 }
 
 // ############################################################################
 void mqtt_reconnect() {
   // Loop until we're reconnected
   int retries = 0;
+  //Serial.print("IP address: ");
+  //Serial.println(WiFi.localIP());
+
+  Serial.print("Mqtt user: ");
+  Serial.print(mqtt_user);
+  Serial.print(" Mqtt password: ");
+  Serial.println(mqtt_password);
+
+  String clientId = "ESPClient-";
+  clientId += chipID;
+  //clientId += String(random(0xffff), HEX);
+  Serial.print("MQTT Client ID : ");
+  Serial.println(clientId);
+
   while (!mqttClient.connected()) {
     Serial.print("Attempting MQTT connection...");
-    // Create a random client ID
-    String clientId = "ESPClient-";
-    clientId += String(random(0xffff), HEX);
-    // Attempt to connect
 
+    // Attempt to connect
     if (mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_password))
       //if (mqttClient.connect(clientId.c_str()))
     {
@@ -353,9 +464,15 @@ void mqtt_reconnect() {
       char cPayload[1024];
       serializeJson(payload, cPayload, 1024);
       mqttClient.publish(statusTopic, cPayload);
-      // ... and resubscribe
-      //client.subscribe("inTopic");
-    } else {
+      // put any subscriptions here
+      // If the subscriptions are disabled the system will continuously reconnect to the broker. But that does not seem to be an issue
+      mqttClient.subscribe(controlTopic);
+      // Not receiving messages subscribed to, workl on this later
+      //Serial.print("Subscribed to : ");
+      //Serial.println(controlTopic);
+    }
+    else
+    {
       Serial.print("failed, rc=");
       Serial.print(mqttClient.state());
       Serial.println(" try again in 5 seconds");
@@ -363,17 +480,18 @@ void mqtt_reconnect() {
       retries++;
       if (retries > 10)
       {
-        Serial.println("Multiple failures connecting to MQTT server, restarting");
-#ifdef ESP8266
-        ESP.reset();
-#else   //ESP32
-        ESP.restart();
-#endif
+        Serial.println("Multiple failures connecting to MQTT server, run config");
+        run_config_portal();
       }
       delay(5000);
     }
   }
 }
+
+// ##################################################################################
+//void MQTTcallback(char* topic, byte* payload, unsigned int length) {
+//  Serial.println("Message received");
+//}
 
 
 // ##################################################################################
@@ -381,33 +499,17 @@ void setup()
 {
   // put your setup code here, to run once:
   Serial.begin(115200);
-  Serial.println("\nStarting AutoConnectWithFSParams");
+  Serial.println("\nStarting ESP_BASIC");
+
+  chipID.toUpperCase();
+  nodeid = "ESP-" + chipID;
 
   loadSPIFFSConfigFile();
-
-  // The extra parameters to be configured (can be either global or just in the setup)
-  // After connecting, parameter.getValue() will get you the configured value
-  // id/name placeholder/prompt default length
-
-  ESP_WMParameter custom_mqtt_server   ("mqtt_server",   "MQTT Server",   mqtt_server,   MQTT_SERVER_MAX_LEN + 1);
-  ESP_WMParameter custom_mqtt_port     ("mqtt_port",     "MQTT Port",     mqtt_port,     MQTT_SERVER_PORT_LEN + 1);
-  ESP_WMParameter custom_mqtt_user     ("mqtt_user",     "MQTT User",     mqtt_user,     MQTT_SERVER_USER_LEN + 1);
-  ESP_WMParameter custom_mqtt_password ("mqtt_password", "MQTT Password", mqtt_password, MQTT_SERVER_PASSWORD_LEN + 1);
 
   // Use this to default DHCP hostname to ESP8266-XXXXXX or ESP32-XXXXXX
   //ESP_WiFiManager ESP_wifiManager;
   // Use this to personalize DHCP hostname (RFC952 conformed)
-  ESP_WiFiManager ESP_wifiManager("AutoConnect-FSParams");
-
-  //set config save notify callback
-  ESP_wifiManager.setSaveConfigCallback(saveConfigCallback);
-
-  //add all your parameters here
-
-  ESP_wifiManager.addParameter(&custom_mqtt_server);
-  ESP_wifiManager.addParameter(&custom_mqtt_port);
-  ESP_wifiManager.addParameter(&custom_mqtt_user);
-  ESP_wifiManager.addParameter(&custom_mqtt_password);
+  ESP_WiFiManager ESP_wifiManager("AutoConnect-Basic");
 
   //reset settings - for testing
   //ESP_wifiManager.resetSettings();
@@ -432,8 +534,9 @@ void setup()
   Router_SSID = ESP_wifiManager.WiFi_SSID();
   Router_Pass = ESP_wifiManager.WiFi_Pass();
 
+
   //Remove this line if you do not want to see WiFi password printed
-  Serial.println("\nStored: SSID = " + Router_SSID + ", Pass = " + Router_Pass);
+  //Serial.println("\nStored: SSID = " + Router_SSID + ", Pass = " + Router_Pass);
 
   if (Router_SSID != "")
   {
@@ -443,58 +546,58 @@ void setup()
   else
   {
     Serial.println("No stored Credentials. No timeout");
+    run_config_portal();
   }
 
-  String chipID = String(ESP_getChipId(), HEX);
-  chipID.toUpperCase();
+  // Get Router SSID and PASS from EEPROM
 
-  // SSID and PW for Config Portal
-  AP_SSID = "ESP_" + chipID + "_AutoConnectAP";
-  AP_PASS = "MyESP_" + chipID;
-  nodeid = "ESP_" + chipID;
+  char cSSID[50];
+  Router_SSID.toCharArray(cSSID, 50);
+  char cPW[50];
+  Router_Pass.toCharArray(cPW, 50);
 
-  // Get Router SSID and PASS from EEPROM, then open Config portal AP named "ESP_XXXXXX_AutoConnectAP" and PW "MyESP_XXXXXX"
-  // 1) If got stored Credentials, Config portal timeout is 60s
-  // 2) If no stored Credentials, stay in Config portal until get WiFi Credentials
-  if (!ESP_wifiManager.autoConnect(AP_SSID.c_str()))
-  {
-    Serial.println("failed to connect and hit timeout");
-
-    //reset and try again, or maybe put it to deep sleep
-#ifdef ESP8266
-    ESP.reset();
-#else   //ESP32
-    ESP.restart();
-#endif
-    delay(1000);
+  WiFi.begin(cSSID, cPW);
+  while (WiFi.status() != WL_CONNECTED) { // Wait for the Wi-Fi to connect
+    delay(500);
+    Serial.print('.');
+    if (millis() > 60000)         // give up after a minute
+    {
+      run_config_portal();
+    }
   }
+
+  Serial.println('\n');
+  Serial.println("Connection established!");
+  Serial.print("IP address:\t");
+  Serial.println(WiFi.localIP());
 
   //if you get here you have connected to the WiFi
   Serial.println("WiFi connected");
 
-  //read updated parameters
+  // Get MQTT parameters
+  ESP_WMParameter custom_mqtt_server   ("mqtt_server",   "MQTT Server",   mqtt_server,   MQTT_SERVER_MAX_LEN + 1);
+  ESP_WMParameter custom_mqtt_port     ("mqtt_port",     "MQTT Port",     mqtt_port,     MQTT_SERVER_PORT_LEN + 1);
 
   strncpy(mqtt_server,   custom_mqtt_server.getValue(),   sizeof(mqtt_server));
   strncpy(mqtt_port,     custom_mqtt_port.getValue(),     sizeof(mqtt_port));
   mqtt_port_int = atoi(custom_mqtt_port.getValue());
-  //Serial.println(mqtt_port_int);
-  strncpy(mqtt_user,     custom_mqtt_user.getValue(),     sizeof(mqtt_user));
-  strncpy(mqtt_password, custom_mqtt_password.getValue(), sizeof(mqtt_password));
 
-  //save the custom parameters to FS
-  if (shouldSaveConfig)
-  {
-    saveSPIFFSConfigFile();
-  }
-
-  Serial.println("local ip");
-  Serial.println(WiFi.localIP());
+  Serial.print("Mqtt host : ");
+  Serial.print(mqtt_server);
+  Serial.print(" Mqtt port : ");
+  Serial.println(mqtt_port_int);
 
   mqttClient.setServer(mqtt_server, mqtt_port_int);
+  //mqttClient.setCallback(MQTTcallback);
+  //mqttClient.setServer(mqtt_server, 1883);
   String sTopic = "AKLC/Network/" + nodeid;
   sTopic.toCharArray(statusTopic, 50);
   sTopic = "AKLC/Node/" + nodeid;
   sTopic.toCharArray(dataTopic, 50);
+  sTopic = "AKLC/Control/" + nodeid;
+  sTopic.toCharArray(controlTopic, 50);
+
+  pinMode(CONFIG_PIN, INPUT_PULLUP);
 
 }
 
