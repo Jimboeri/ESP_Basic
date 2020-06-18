@@ -401,7 +401,7 @@ void mqtt_reconnect()
 
     // Attempt to connect
     if (mqttClient.connect(clientId.c_str(), mqtt_user, mqtt_password))
-    //if (mqttClient.connect(clientId.c_str()))
+      //if (mqttClient.connect(clientId.c_str()))
     {
       Serial.println("connected");
       // Once connected, publish an announcement...
@@ -443,19 +443,38 @@ void mqtt_reconnect()
 
 // ##################################################################################
 void MQTTcallback(char* topic, byte* payload, unsigned int length) {
- 
+
   Serial.println("");
   Serial.print("Message arrived in topic: ");
   Serial.println(topic);
- 
+
   Serial.print("Message:");
+
+  // If you want the payload as a string
+  // String sPl = String((char *)payload);
+  // Serial.println(sPl);
+
+  // If the payload should be JSON
+  char pl[length];
+
   for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
+    pl[i] = (char)payload[i];
   }
- 
-  Serial.println();
+  //pl[length + 1] = '\0';
+
+  DynamicJsonDocument json(length + 1);
+  DeserializationError error = deserializeJson(json, pl);
+  if (error) {
+    Serial.println(pl);
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.c_str());
+    return;
+  }
+  else
+  {
+    serializeJsonPretty(json, Serial);
+  }
   Serial.println("-----------------------");
- 
 }
 
 // ##################################################################################
@@ -553,7 +572,7 @@ void setup()
 
   mqttClient.setServer(mqtt_server, mqtt_port_int);
   mqttClient.setCallback(MQTTcallback);
- 
+
   String sTopic = MQTT_TOPIC "/Network/" + nodeid;
   sTopic.toCharArray(statusTopic, 50);
   sTopic = MQTT_TOPIC "/Node/" + nodeid;
