@@ -421,8 +421,8 @@ void mqtt_reconnect()
       // If the subscriptions are disabled the system will continuously reconnect to the broker. But that does not seem to be an issue
       mqttClient.subscribe(controlTopic);
       // Not receiving messages subscribed to, workl on this later
-      //Serial.print("Subscribed to : ");
-      //Serial.println(controlTopic);
+      Serial.print("Subscribed to : ");
+      Serial.println(controlTopic);
     }
     else
     {
@@ -442,9 +442,21 @@ void mqtt_reconnect()
 }
 
 // ##################################################################################
-//void MQTTcallback(char* topic, byte* payload, unsigned int length) {
-//  Serial.println("Message received");
-//}
+void MQTTcallback(char* topic, byte* payload, unsigned int length) {
+ 
+  Serial.println("");
+  Serial.print("Message arrived in topic: ");
+  Serial.println(topic);
+ 
+  Serial.print("Message:");
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)payload[i]);
+  }
+ 
+  Serial.println();
+  Serial.println("-----------------------");
+ 
+}
 
 // ##################################################################################
 void setup()
@@ -540,8 +552,8 @@ void setup()
   Serial.println(mqtt_port_int);
 
   mqttClient.setServer(mqtt_server, mqtt_port_int);
-  //mqttClient.setCallback(MQTTcallback);
-  //mqttClient.setServer(mqtt_server, 1883);
+  mqttClient.setCallback(MQTTcallback);
+ 
   String sTopic = MQTT_TOPIC "/Network/" + nodeid;
   sTopic.toCharArray(statusTopic, 50);
   sTopic = MQTT_TOPIC "/Node/" + nodeid;
