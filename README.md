@@ -10,7 +10,7 @@ This is based on [WiFiManager](https://github.com/tzapu/WiFiManager), and in par
   - Wifi details
   - MQTT settings
 * Send status updates on startup and at regular intervals over MQTT
-* Be able to go into config mode if a button is pressed for a minute
+* Be able to go into config mode if a button is pressed for a second
 * Run the config portal if WiFi connection fails, or if MQTT cannot connect
 
 ## Dependencies
